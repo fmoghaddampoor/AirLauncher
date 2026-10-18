@@ -373,6 +373,10 @@ fn main() -> eframe::Result {
     }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!("../assets/AirLauncher.png"))
+                    .expect("The embedded application icon must be valid"),
+            )
             .with_inner_size([700.0, 620.0])
             .with_min_inner_size([660.0, 600.0]),
         renderer: eframe::Renderer::Glow,
