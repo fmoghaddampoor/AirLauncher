@@ -9,13 +9,58 @@ const MINT: Color32 = Color32::from_rgb(156, 230, 210);
 const BACKGROUND: Color32 = Color32::from_rgb(16, 24, 28);
 const MUTED: Color32 = Color32::from_rgb(159, 175, 181);
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 struct Settings {
     #[serde(rename = "RecentFolders")]
     recent: Vec<String>,
     #[serde(rename = "Agent")]
     agent: String,
+    #[serde(rename = "Codex")]
+    codex: CodexSettings,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            recent: Vec::new(),
+            agent: "codex".into(),
+            codex: CodexSettings::default(),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Deserialize, Serialize)]
+#[serde(default, rename_all = "PascalCase")]
+struct CodexSettings {
+    model: String,
+    reasoning_effort: String,
+    permissions: String,
+}
+
+impl Default for CodexSettings {
+    fn default() -> Self {
+        Self {
+            model: "gpt-6.1-sol".into(),
+            reasoning_effort: "medium".into(),
+            permissions: "full-access".into(),
+        }
+    }
+}
+
+const REASONING_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultra"];
+const PERMISSION_MODES: &[(&str, &str)] = &[
+    ("full-access", "Full access"),
+    ("workspace-write", "Workspace write"),
+    ("read-only", "Read only"),
+];
+
+fn valid_model(model: &str) -> bool {
+    !model.is_empty()
+        && model.starts_with(|character: char| character.is_ascii_alphanumeric())
+        && model
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:/".contains(&byte))
 }
 
 struct Launcher {
@@ -32,14 +77,48 @@ fn app_directory() -> PathBuf {
 }
 
 fn load_settings() -> Settings {
-    let path = app_directory().join("settings.json");
-    let bytes = fs::read(path).unwrap_or_default();
+    load_settings_from(&settings_path(), &app_directory().join("settings.json"))
+}
+
+fn settings_path() -> PathBuf {
+    let base = env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| app_directory().join("preferences"));
+    base.join("AirLauncher").join("settings.json")
+}
+
+fn load_settings_from(path: &std::path::Path, legacy_path: &std::path::Path) -> Settings {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::read(legacy_path).unwrap_or_default()
+        }
+        Err(_) => Vec::new(),
+    };
     parse_settings(&bytes)
+}
+
+fn save_settings_to(settings: &Settings, path: &std::path::Path) -> io::Result<()> {
+    let bytes = serde_json::to_vec_pretty(settings)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, bytes)
 }
 
 fn parse_settings(bytes: &[u8]) -> Settings {
     let content = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
-    serde_json::from_slice(content).unwrap_or_default()
+    let mut settings: Settings = serde_json::from_slice(content).unwrap_or_default();
+    if !REASONING_LEVELS.contains(&settings.codex.reasoning_effort.as_str()) {
+        settings.codex.reasoning_effort = CodexSettings::default().reasoning_effort;
+    }
+    if !PERMISSION_MODES
+        .iter()
+        .any(|(value, _)| *value == settings.codex.permissions)
+    {
+        settings.codex.permissions = CodexSettings::default().permissions;
+    }
+    settings
 }
 
 fn normalize_project(input: &str) -> io::Result<PathBuf> {
@@ -57,11 +136,13 @@ fn encoded_script(
     agent: &str,
     action: &str,
     receipt: Option<&std::path::Path>,
+    codex: &CodexSettings,
 ) -> String {
     let directory = app_directory();
     let payload = serde_json::json!({
         "project": project.to_string_lossy(),
         "agent": agent,
+        "codex": codex,
         "action": action,
         "app_directory": directory.to_string_lossy(),
         "receipt": receipt.map(|path| path.to_string_lossy().into_owned()).unwrap_or_default(),
@@ -71,7 +152,7 @@ fn encoded_script(
     let script = format!(
         "$json = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{payload_base64}'))\n\
          $launch = $json | ConvertFrom-Json\n\
-         $parameters = @{{Project=$launch.project; Agent=$launch.agent; Action=$launch.action; AppDirectory=$launch.app_directory; ReceiptPath=$launch.receipt}}\n\
+         $parameters = @{{Project=$launch.project; Agent=$launch.agent; Action=$launch.action; AppDirectory=$launch.app_directory; ReceiptPath=$launch.receipt; CodexModel=$launch.codex.Model; CodexReasoningEffort=$launch.codex.ReasoningEffort; CodexPermissions=$launch.codex.Permissions}}\n\
          & {{\n{}\n}} @parameters",
         include_str!("terminal.ps1")
     );
@@ -84,8 +165,9 @@ fn shell_arguments(
     agent: &str,
     action: &str,
     receipt: Option<&std::path::Path>,
+    codex: &CodexSettings,
 ) -> Vec<String> {
-    let encoded_command = encoded_script(project, agent, action, receipt);
+    let encoded_command = encoded_script(project, agent, action, receipt, codex);
     let mut arguments = vec!["-NoLogo".into(), "-NoProfile".into()];
     if action != "check" {
         arguments.push("-NoExit".into());
@@ -104,10 +186,11 @@ fn open_terminal(
     agent: &str,
     action: &str,
     receipt: Option<&std::path::Path>,
+    codex: &CodexSettings,
 ) -> io::Result<()> {
     let directory = app_directory();
     fs::create_dir_all(&directory)?;
-    let arguments = shell_arguments(project, agent, action, receipt);
+    let arguments = shell_arguments(project, agent, action, receipt, codex);
     let shell = "powershell.exe";
     let terminal = Command::new("wt.exe")
         .args(["-w", "new", "new-tab", shell])
@@ -165,15 +248,33 @@ impl Launcher {
             .first()
             .cloned()
             .unwrap_or_else(|| default_directory.to_string_lossy().into_owned());
-        Self {
+        let mut launcher = Self {
             settings,
             project,
             status: "Ready when you are.".into(),
             failed: false,
+        };
+        launcher.save_preferences();
+        launcher
+    }
+
+    fn save_preferences(&mut self) {
+        if let Err(error) = save_settings_to(&self.settings, &settings_path()) {
+            self.status = format!("Could not save settings: {error}");
+            self.failed = true;
         }
     }
 
     fn launch(&mut self, action: &str) {
+        self.settings.codex.model = self.settings.codex.model.trim().into();
+        if action == "run"
+            && self.settings.agent == "codex"
+            && !valid_model(&self.settings.codex.model)
+        {
+            self.status = "Enter a model ID such as gpt-6.1-sol (no spaces).".into();
+            self.failed = true;
+            return;
+        }
         let project = match normalize_project(&self.project) {
             Ok(directory) => directory,
             Err(error) => {
@@ -182,7 +283,13 @@ impl Launcher {
                 return;
             }
         };
-        if let Err(error) = open_terminal(&project, &self.settings.agent, action, None) {
+        if let Err(error) = open_terminal(
+            &project,
+            &self.settings.agent,
+            action,
+            None,
+            &self.settings.codex,
+        ) {
             self.status = format!("Could not open PowerShell: {error}");
             self.failed = true;
             return;
@@ -191,7 +298,7 @@ impl Launcher {
         self.status = match action {
             "login" => "Complete JetBrains sign-in in the browser, then open your agent.",
             "status" => "Gateway connection details opened in a terminal.",
-            _ => "Terminal opened. Codex uses its own compatible settings and CLI.",
+            _ => "Terminal opened with your selected agent settings.",
         }
         .into();
         if action != "run" {
@@ -204,158 +311,207 @@ impl Launcher {
             .retain(|entry| !entry.eq_ignore_ascii_case(&self.project));
         self.settings.recent.insert(0, self.project.clone());
         self.settings.recent.truncate(10);
-        let save_result = (|| -> Result<(), Box<dyn std::error::Error>> {
-            let bytes = serde_json::to_vec_pretty(&self.settings)?;
-            fs::write(app_directory().join("settings.json"), bytes)?;
-            Ok(())
-        })();
-        if save_result.is_err() {
-            self.status.push_str(" Recent folders could not be saved.");
-        }
+        self.save_preferences();
     }
 }
 
 impl eframe::App for Launcher {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let previous_settings = self.settings.clone();
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(BACKGROUND).inner_margin(32.0))
             .show(ui, |ui| {
-                ui.spacing_mut().item_spacing = Vec2::new(12.0, 14.0);
-                ui.spacing_mut().button_padding = Vec2::new(14.0, 10.0);
-                ui.spacing_mut().interact_size.y = 40.0;
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("air / launcher").size(20.0).color(MINT));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        egui::Frame::new()
-                            .fill(Color32::from_rgb(28, 57, 53))
-                            .corner_radius(8)
-                            .inner_margin(egui::Margin::symmetric(12, 6))
-                            .show(ui, |ui| {
-                                ui.label(RichText::new("JETBRAINS AI").size(10.0).color(MINT));
-                            });
-                    });
-                });
-                ui.add_space(12.0);
-                ui.heading(RichText::new("A fresh space to build.").size(30.0));
-                ui.label(RichText::new("Choose your project. Start your agent.").color(MUTED));
-                ui.add_space(16.0);
-                ui.label(RichText::new("PROJECT FOLDER").size(11.0).color(MUTED));
-                ui.horizontal(|ui| {
-                    let width = (ui.available_width() - 100.0).max(100.0);
-                    ui.add_sized(
-                        [width, 42.0],
-                        egui::TextEdit::singleline(&mut self.project)
-                            .font(FontId::proportional(14.0))
-                            .vertical_align(egui::Align::Center)
-                            .margin(egui::Margin::symmetric(12, 10))
-                            .hint_text("Choose a project folder"),
-                    );
-                    if ui
-                        .add_sized([84.0, 42.0], egui::Button::new("Browse..."))
-                        .clicked()
-                    {
-                        let selected = rfd::FileDialog::new()
-                            .set_directory(&self.project)
-                            .pick_folder();
-                        if let Some(directory) = selected {
-                            self.project = directory.to_string_lossy().into_owned();
-                        }
-                    }
-                });
-                if !self.settings.recent.is_empty() {
-                    egui::ComboBox::from_id_salt("recent")
-                        .selected_text(RichText::new("Recent projects").size(13.0).color(MINT))
-                        .width(ui.available_width())
-                        .icon(|ui, rect, _visuals, is_open| {
-                            let center = rect.center();
-                            let direction = if is_open { -1.0 } else { 1.0 };
-                            let left = center + egui::vec2(-4.0, -2.0 * direction);
-                            let middle = center + egui::vec2(0.0, 2.0 * direction);
-                            let right = center + egui::vec2(4.0, -2.0 * direction);
-                            let stroke = egui::Stroke::new(1.5, MINT);
-                            ui.painter().line_segment([left, middle], stroke);
-                            ui.painter().line_segment([middle, right], stroke);
-                        })
-                        .show_ui(ui, |ui| {
-                            for directory in &self.settings.recent {
-                                let path = std::path::Path::new(directory);
-                                let project_name =
-                                    path.file_name().unwrap_or_default().to_string_lossy();
-                                let selected = self.project.eq_ignore_ascii_case(directory);
-                                let label = RichText::new(project_name).size(14.0);
-                                if ui
-                                    .add_sized(
-                                        [ui.available_width(), 40.0],
-                                        egui::Button::new(label).selected(selected),
-                                    )
-                                    .on_hover_text(directory)
-                                    .clicked()
-                                {
-                                    self.project = directory.clone();
-                                }
-                            }
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(12.0, 14.0);
+                    ui.spacing_mut().button_padding = Vec2::new(14.0, 10.0);
+                    ui.spacing_mut().interact_size.y = 40.0;
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("air / launcher").size(20.0).color(MINT));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            egui::Frame::new()
+                                .fill(Color32::from_rgb(28, 57, 53))
+                                .corner_radius(8)
+                                .inner_margin(egui::Margin::symmetric(12, 6))
+                                .show(ui, |ui| {
+                                    ui.label(RichText::new("JETBRAINS AI").size(10.0).color(MINT));
+                                });
                         });
-                }
-                ui.add_space(6.0);
-                ui.label(RichText::new("CODING AGENT").size(11.0).color(MUTED));
-                ui.horizontal(|ui| {
-                    let button_width = (ui.available_width() - 24.0) / 3.0;
-                    for (agent, label) in [
-                        ("codex", "Codex"),
-                        ("claude", "Claude Code"),
-                        ("gemini", "Gemini CLI"),
-                    ] {
-                        let selected = self.settings.agent == agent;
+                    });
+                    ui.add_space(12.0);
+                    ui.heading(RichText::new("A fresh space to build.").size(30.0));
+                    ui.label(RichText::new("Choose your project. Start your agent.").color(MUTED));
+                    ui.add_space(16.0);
+                    ui.label(RichText::new("PROJECT FOLDER").size(11.0).color(MUTED));
+                    ui.horizontal(|ui| {
+                        let width = (ui.available_width() - 100.0).max(100.0);
+                        ui.add_sized(
+                            [width, 42.0],
+                            egui::TextEdit::singleline(&mut self.project)
+                                .font(FontId::proportional(14.0))
+                                .vertical_align(egui::Align::Center)
+                                .margin(egui::Margin::symmetric(12, 10))
+                                .hint_text("Choose a project folder"),
+                        );
                         if ui
-                            .add_sized(
-                                [button_width, 40.0],
-                                egui::Button::new(label).selected(selected),
-                            )
+                            .add_sized([84.0, 42.0], egui::Button::new("Browse..."))
                             .clicked()
                         {
-                            self.settings.agent = agent.into();
+                            let selected = rfd::FileDialog::new()
+                                .set_directory(&self.project)
+                                .pick_folder();
+                            if let Some(directory) = selected {
+                                self.project = directory.to_string_lossy().into_owned();
+                            }
                         }
+                    });
+                    if !self.settings.recent.is_empty() {
+                        egui::ComboBox::from_id_salt("recent")
+                            .selected_text(RichText::new("Recent projects").size(13.0).color(MINT))
+                            .width(ui.available_width())
+                            .icon(|ui, rect, _visuals, is_open| {
+                                let center = rect.center();
+                                let direction = if is_open { -1.0 } else { 1.0 };
+                                let left = center + egui::vec2(-4.0, -2.0 * direction);
+                                let middle = center + egui::vec2(0.0, 2.0 * direction);
+                                let right = center + egui::vec2(4.0, -2.0 * direction);
+                                let stroke = egui::Stroke::new(1.5, MINT);
+                                ui.painter().line_segment([left, middle], stroke);
+                                ui.painter().line_segment([middle, right], stroke);
+                            })
+                            .show_ui(ui, |ui| {
+                                for directory in &self.settings.recent {
+                                    let path = std::path::Path::new(directory);
+                                    let project_name =
+                                        path.file_name().unwrap_or_default().to_string_lossy();
+                                    let selected = self.project.eq_ignore_ascii_case(directory);
+                                    let label = RichText::new(project_name).size(14.0);
+                                    if ui
+                                        .add_sized(
+                                            [ui.available_width(), 40.0],
+                                            egui::Button::new(label).selected(selected),
+                                        )
+                                        .on_hover_text(directory)
+                                        .clicked()
+                                    {
+                                        self.project = directory.clone();
+                                    }
+                                }
+                            });
                     }
-                });
-                ui.add_space(12.0);
-                ui.horizontal(|ui| {
-                    let agent_label = match self.settings.agent.as_str() {
-                        "claude" => "Claude Code",
-                        "gemini" => "Gemini CLI",
-                        _ => "Codex",
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("CODING AGENT").size(11.0).color(MUTED));
+                    ui.horizontal(|ui| {
+                        let button_width = (ui.available_width() - 24.0) / 3.0;
+                        for (agent, label) in [
+                            ("codex", "Codex"),
+                            ("claude", "Claude Code"),
+                            ("gemini", "Gemini CLI"),
+                        ] {
+                            let selected = self.settings.agent == agent;
+                            if ui
+                                .add_sized(
+                                    [button_width, 40.0],
+                                    egui::Button::new(label).selected(selected),
+                                )
+                                .clicked()
+                            {
+                                self.settings.agent = agent.into();
+                            }
+                        }
+                    });
+                    if self.settings.agent == "codex" {
+                        ui.label(RichText::new("CODEX SETTINGS").size(11.0).color(MUTED));
+                        ui.horizontal(|ui| {
+                            ui.label("Model");
+                            ui.add_sized(
+                                [ui.available_width(), 40.0],
+                                egui::TextEdit::singleline(&mut self.settings.codex.model)
+                                    .hint_text("gpt-6.1-sol"),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Reasoning");
+                            egui::ComboBox::from_id_salt("codex-reasoning")
+                                .selected_text(&self.settings.codex.reasoning_effort)
+                                .width(100.0)
+                                .show_ui(ui, |ui| {
+                                    for level in REASONING_LEVELS {
+                                        ui.selectable_value(
+                                            &mut self.settings.codex.reasoning_effort,
+                                            (*level).into(),
+                                            *level,
+                                        );
+                                    }
+                                });
+                            ui.label("Permissions");
+                            let label = PERMISSION_MODES
+                                .iter()
+                                .find(|(value, _)| *value == self.settings.codex.permissions)
+                                .map(|(_, label)| *label)
+                                .unwrap_or("Full access");
+                            egui::ComboBox::from_id_salt("codex-permissions")
+                                .selected_text(label)
+                                .width(150.0)
+                                .show_ui(ui, |ui| {
+                                    for (value, label) in PERMISSION_MODES {
+                                        ui.selectable_value(
+                                            &mut self.settings.codex.permissions,
+                                            (*value).into(),
+                                            *label,
+                                        );
+                                    }
+                                });
+                        });
+                        let detail = match self.settings.codex.permissions.as_str() {
+                            "full-access" => "Full access: no sandbox or approval prompts.",
+                            "read-only" => "Read only: approval required for additional access.",
+                            _ => "Workspace write: approval required for additional access.",
+                        };
+                        ui.label(RichText::new(detail).size(11.0).color(MUTED));
+                    }
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        let agent_label = match self.settings.agent.as_str() {
+                            "claude" => "Claude Code",
+                            "gemini" => "Gemini CLI",
+                            _ => "Codex",
+                        };
+                        let label = format!("Open {agent_label}");
+                        let text = RichText::new(label).strong().color(BACKGROUND);
+                        let width = (ui.available_width() - 112.0).max(160.0);
+                        if ui
+                            .add_sized([width, 46.0], egui::Button::new(text).fill(MINT))
+                            .clicked()
+                        {
+                            self.launch("run");
+                        }
+                        if ui
+                            .add_sized([96.0, 46.0], egui::Button::new("Sign in"))
+                            .clicked()
+                        {
+                            self.launch("login");
+                        }
+                    });
+                    let status_color = if self.failed {
+                        Color32::from_rgb(240, 186, 146)
+                    } else {
+                        MINT
                     };
-                    let label = format!("Open {agent_label}");
-                    let text = RichText::new(label).strong().color(BACKGROUND);
-                    let width = (ui.available_width() - 112.0).max(160.0);
-                    if ui
-                        .add_sized([width, 46.0], egui::Button::new(text).fill(MINT))
-                        .clicked()
-                    {
-                        self.launch("run");
+                    ui.label(RichText::new(&self.status).color(status_color).size(13.0));
+                    ui.add_space(8.0);
+                    if ui.link("Gateway status").clicked() {
+                        self.launch("status");
                     }
-                    if ui
-                        .add_sized([96.0, 46.0], egui::Button::new("Sign in"))
-                        .clicked()
-                    {
-                        self.launch("login");
-                    }
+                    ui.label(
+                        RichText::new("PowerShell sessions / JetBrains AI credits")
+                            .color(MUTED)
+                            .size(11.0),
+                    );
                 });
-                let status_color = if self.failed {
-                    Color32::from_rgb(240, 186, 146)
-                } else {
-                    MINT
-                };
-                ui.label(RichText::new(&self.status).color(status_color).size(13.0));
-                ui.add_space(8.0);
-                if ui.link("Gateway status").clicked() {
-                    self.launch("status");
-                }
-                ui.label(
-                    RichText::new("PowerShell sessions / JetBrains AI credits")
-                        .color(MUTED)
-                        .size(11.0),
-                );
             });
+        if self.settings != previous_settings {
+            self.save_preferences();
+        }
     }
 }
 
@@ -377,7 +533,7 @@ fn main() -> eframe::Result {
                 eframe::icon_data::from_png_bytes(include_bytes!("../assets/AirLauncher.png"))
                     .expect("The embedded application icon must be valid"),
             )
-            .with_inner_size([700.0, 620.0])
+            .with_inner_size([700.0, 820.0])
             .with_min_inner_size([660.0, 600.0]),
         renderer: eframe::Renderer::Glow,
         ..Default::default()
@@ -396,7 +552,13 @@ fn verify_terminal_handoff() -> io::Result<()> {
         .map_err(io::Error::other)?
         .as_millis();
     let receipt = app_directory().join(format!("terminal-check-{timestamp}.txt"));
-    open_terminal(&project, "codex", "check", Some(&receipt))?;
+    open_terminal(
+        &project,
+        "codex",
+        "check",
+        Some(&receipt),
+        &load_settings().codex,
+    )?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
     while std::time::Instant::now() < deadline {
         if let Ok(contents) = fs::read_to_string(&receipt) {
@@ -429,10 +591,69 @@ mod tests {
 
         // Assert: preserve both the chosen agent and the recent project.
         assert_eq!(settings.agent, "codex");
+        assert_eq!(settings.codex.model, "gpt-6.1-sol");
+        assert_eq!(settings.codex.reasoning_effort, "medium");
+        assert_eq!(settings.codex.permissions, "full-access");
         assert_eq!(
             settings.recent,
             [r"C:\Users\farzad.moghaddampoor\Documents\Repo\AirCodexUsage"]
         );
+    }
+
+    #[test]
+    fn imports_legacy_preferences_then_restores_saved_codex_choices() {
+        let directory = env::temp_dir().join(format!(
+            "air-launcher-settings-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let legacy = directory.join("legacy.json");
+        let current = directory.join("AppData/AirLauncher/settings.json");
+        fs::write(
+            &legacy,
+            br#"{"Agent":"claude","RecentFolders":["C:\\project"]}"#,
+        )
+        .unwrap();
+        let mut settings = load_settings_from(&current, &legacy);
+        assert_eq!(settings.agent, "claude");
+        assert_eq!(settings.recent, [r"C:\project"]);
+        settings.codex = CodexSettings {
+            model: "custom-model".into(),
+            reasoning_effort: "high".into(),
+            permissions: "read-only".into(),
+        };
+        save_settings_to(&settings, &current).unwrap();
+        let restored = load_settings_from(&current, &legacy);
+        assert!(restored == settings);
+        assert_eq!(
+            parse_settings(&fs::read(&legacy).unwrap()).codex.model,
+            "gpt-6.1-sol"
+        );
+        fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn passes_selected_codex_settings_through_the_encoded_handoff() {
+        let codex = CodexSettings {
+            model: "custom-model".into(),
+            reasoning_effort: "high".into(),
+            permissions: "workspace-write".into(),
+        };
+        let arguments = shell_arguments(
+            &PathBuf::from(r"C:\Project with spaces"),
+            "codex",
+            "run",
+            None,
+            &codex,
+        );
+        let payload = decode_launch_payload(&arguments);
+        assert_eq!(payload["codex"]["Model"], "custom-model");
+        assert_eq!(payload["codex"]["ReasoningEffort"], "high");
+        assert_eq!(payload["codex"]["Permissions"], "workspace-write");
     }
 
     #[test]
@@ -441,7 +662,7 @@ mod tests {
         let project = PathBuf::from(r"C:\Program Files\PowerShell\7");
 
         // Act: construct terminal arguments and decode the actual embedded launch payload.
-        let arguments = shell_arguments(&project, "codex", "run", None);
+        let arguments = shell_arguments(&project, "codex", "run", None, &CodexSettings::default());
         let payload = decode_launch_payload(&arguments);
 
         // Assert: preserve the complete path without passing a script filename to PowerShell.
@@ -456,7 +677,8 @@ mod tests {
         let project = PathBuf::from(r"C:\Users\farzad.moghaddampoor\Documents\Repo\AirCodexUsage");
 
         // Act: construct the same terminal script invocation used by the build check.
-        let arguments = shell_arguments(&project, "codex", "check", None);
+        let arguments =
+            shell_arguments(&project, "codex", "check", None, &CodexSettings::default());
         let payload = decode_launch_payload(&arguments);
 
         // Assert: the check action is selected and PowerShell can exit when it finishes.
@@ -470,7 +692,8 @@ mod tests {
         let project = PathBuf::from(r"C:\Users\farzad.moghaddampoor\Documents\Repo\AirCodexUsage");
 
         // Act: build and decode the same command used by the Sign in button.
-        let arguments = shell_arguments(&project, "codex", "login", None);
+        let arguments =
+            shell_arguments(&project, "codex", "login", None, &CodexSettings::default());
         let payload = decode_launch_payload(&arguments);
 
         // Assert: route sign-in correctly without the missing terminal-v2.ps1 handoff.

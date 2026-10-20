@@ -3,7 +3,10 @@ param(
     [ValidateSet('codex', 'claude', 'gemini')][string]$Agent = 'codex',
     [ValidateSet('run', 'login', 'status', 'check')][string]$Action = 'run',
     [Parameter(Mandatory = $true)][string]$AppDirectory,
-    [string]$ReceiptPath
+    [string]$ReceiptPath,
+    [string]$CodexModel = 'gpt-6.1-sol',
+    [ValidateSet('low', 'medium', 'high', 'xhigh', 'max', 'ultra')][string]$CodexReasoningEffort = 'medium',
+    [ValidateSet('full-access', 'workspace-write', 'read-only')][string]$CodexPermissions = 'full-access'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -24,7 +27,19 @@ try {
         return
     }
 
+    $agentArguments = @('run', $Agent)
     if ($Agent -eq 'codex') {
+        # Start-Process joins ArgumentList into a command line. Only accept model ID characters.
+        if ($CodexModel -cnotmatch '^[A-Za-z0-9][A-Za-z0-9_.:/-]*$') {
+            throw 'Enter a valid Codex model ID (no spaces).'
+        }
+        $agentArguments += @('--', '--model', $CodexModel, '-c', "model_reasoning_effort=$CodexReasoningEffort")
+        if ($CodexPermissions -eq 'full-access') {
+            $agentArguments += '--dangerously-bypass-approvals-and-sandbox'
+        }
+        else {
+            $agentArguments += @('--sandbox', $CodexPermissions, '--ask-for-approval', 'on-request')
+        }
         $env:CODEX_HOME = Join-Path $AppDirectory 'codex'
         $null = New-Item -ItemType Directory -Path $env:CODEX_HOME -Force
         $toolDirectory = Join-Path $AppDirectory 'tools\node_modules\.bin'
@@ -42,7 +57,7 @@ try {
         $previousErrorPreference = $ErrorActionPreference
         try {
             $ErrorActionPreference = 'Continue'
-            $null = & rtk proxy central run codex -- debug prompt-input 'Validate the launcher configuration without sending a model request.' 2> $checkErrorPath
+            $null = & rtk proxy central @agentArguments debug prompt-input 'Validate the launcher configuration without sending a model request.' 2> $checkErrorPath
             $checkExitCode = $LASTEXITCODE
         }
         finally { $ErrorActionPreference = $previousErrorPreference }
@@ -54,7 +69,7 @@ try {
     $hasBasicTerminalType = [string]::IsNullOrWhiteSpace($env:TERM) -or $env:TERM -eq 'dumb'
     if ($hasBasicTerminalType) { $env:TERM = 'xterm-256color' }
     $gateway = (Get-Command central.exe -ErrorAction Stop).Source
-    $agentProcess = Start-Process -FilePath $gateway -ArgumentList @('run', $Agent) -NoNewWindow -Wait -PassThru
+    $agentProcess = Start-Process -FilePath $gateway -ArgumentList $agentArguments -NoNewWindow -Wait -PassThru
     $agentExitCode = $agentProcess.ExitCode
     if ($agentExitCode -ne 0) {
         Write-Host "Agent exited with code $agentExitCode. Read the error above; use Gateway status in the launcher for connection details." -ForegroundColor Yellow

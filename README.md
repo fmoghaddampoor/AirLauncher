@@ -4,7 +4,11 @@ A native Rust desktop launcher for coding agents using your JetBrains AI subscri
 
 Double-click **AirLauncher.exe** or the **Air Launcher** desktop shortcut. Choose a project folder, select an agent, and click **Open**. A new Windows Terminal window opens PowerShell in that folder. If Windows Terminal is unavailable, the launcher opens PowerShell directly. The startup script and its parameters are passed as one encoded command; launching never depends on an extracted script file.
 
-Use **Sign in** once to connect your JetBrains account. Complete the browser flow before starting an agent. Recent folders and your agent choice are saved under `%USERPROFILE%\.air-launcher\settings.json`; credentials are handled by JetBrains.
+Use **Sign in** once to connect your JetBrains account. Complete the browser flow before starting an agent. Recent folders, your agent choice, and Codex options are saved under `%APPDATA%\AirLauncher\settings.json`; credentials are handled by JetBrains. Existing preferences from `%USERPROFILE%\.air-launcher\settings.json` are imported when the new file does not exist.
+
+Select **Codex** to edit the model ID, reasoning effort, and permissions. Defaults are `gpt-6.1-sol`, `medium`, and **Full access** (no sandbox or approval prompts). **Workspace write** and **Read only** keep approval prompts for additional access. Changes are saved automatically, including when you close the launcher without opening an agent. Available models and reasoning levels depend on your gateway/account. These settings are passed only to Codex sessions launched here.
+
+The launcher forwards `--model <model> -c model_reasoning_effort=<effort>` through `central run codex --`, plus `--dangerously-bypass-approvals-and-sandbox` for Full access or `--sandbox <mode> --ask-for-approval on-request` for the other modes. See the [official Codex CLI reference](https://developers.openai.com/codex/cli/reference) and [configuration reference](https://developers.openai.com/codex/config-reference).
 
 The launcher starts `central run <agent>` with inherited console handles for each interactive session. Output-filtering proxies such as RTK must not wrap the interactive agent: they turn stdout into a pipe, which Codex rejects with `stdout is not a terminal`. RTK is used for noninteractive diagnostics. Usage consumes JetBrains AI credits. **Gateway status** opens connection details in a terminal.
 
@@ -21,7 +25,7 @@ rtk proxy powershell -NoProfile -ExecutionPolicy Bypass -File .\Build.ps1
 rtk proxy powershell -NoProfile -ExecutionPolicy Bypass -File .\InstallShortcut.ps1
 ```
 
-Run `rtk cargo test --release --locked`, `rtk cargo fmt --check`, and `rtk cargo clippy --release --all-targets --locked -- -D warnings` for checks. Cargo.lock records Rust dependency versions. Previous executables are backed up under `legacy` before replacement.
+Run `rtk cargo test --release --locked`, `rtk cargo fmt --check`, and `rtk cargo clippy --release --all-targets --locked -- -D warnings` for checks. Run `powershell -NoProfile -File tests/TerminalArguments.ps1` to verify the terminal script's argument forwarding for each permission mode and the other agents without making a model request. Cargo.lock records Rust dependency versions. Previous executables are backed up under `legacy` before replacement.
 
 To build, verify, and publish a single executable, run:
 
