@@ -400,32 +400,70 @@ impl eframe::App for Launcher {
                     }
                     ui.add_space(6.0);
                     ui.label(RichText::new("CODING AGENT").size(11.0).color(MUTED));
-                    ui.horizontal(|ui| {
-                        let button_width = (ui.available_width() - 24.0) / 3.0;
+                    let tabs = ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        let tab_width = (ui.available_width() - 8.0) / 3.0;
+                        let mut selected_rect = None;
                         for (agent, label) in [
                             ("codex", "Codex"),
                             ("claude", "Claude Code"),
                             ("gemini", "Gemini CLI"),
                         ] {
                             let selected = self.settings.agent == agent;
-                            if ui
-                                .add_sized(
-                                    [button_width, 40.0],
-                                    egui::Button::new(label).selected(selected),
-                                )
-                                .clicked()
-                            {
+                            let text =
+                                RichText::new(label).color(if selected { MINT } else { MUTED });
+                            let tab = ui.add_sized(
+                                [tab_width, 40.0],
+                                egui::Button::new(text)
+                                    .selected(selected)
+                                    .fill(if selected {
+                                        Color32::from_rgb(28, 57, 53)
+                                    } else {
+                                        Color32::TRANSPARENT
+                                    })
+                                    .stroke(egui::Stroke::NONE)
+                                    .corner_radius(egui::CornerRadius {
+                                        nw: 10,
+                                        ne: 10,
+                                        sw: 0,
+                                        se: 0,
+                                    }),
+                            );
+                            if selected {
+                                selected_rect = Some(tab.rect);
+                            }
+                            if tab.clicked() {
                                 self.settings.agent = agent.into();
                             }
                         }
+                        selected_rect
                     });
+                    let baseline = tabs.response.rect.bottom();
+                    ui.painter().line_segment(
+                        [
+                            egui::pos2(tabs.response.rect.left(), baseline),
+                            egui::pos2(tabs.response.rect.right(), baseline),
+                        ],
+                        egui::Stroke::new(1.0, Color32::from_rgb(48, 72, 78)),
+                    );
+                    if let Some(rect) = tabs.inner {
+                        ui.painter().line_segment(
+                            [
+                                egui::pos2(rect.left(), baseline),
+                                egui::pos2(rect.right(), baseline),
+                            ],
+                            egui::Stroke::new(2.0, MINT),
+                        );
+                    }
                     if self.settings.agent == "codex" {
                         ui.label(RichText::new("CODEX SETTINGS").size(11.0).color(MUTED));
                         ui.horizontal(|ui| {
                             ui.label("Model");
                             ui.add_sized(
-                                [ui.available_width(), 40.0],
+                                [240.0, 40.0],
                                 egui::TextEdit::singleline(&mut self.settings.codex.model)
+                                    .vertical_align(egui::Align::Center)
+                                    .margin(egui::Margin::symmetric(12, 10))
                                     .hint_text("gpt-6.1-sol"),
                             );
                         });
@@ -468,6 +506,17 @@ impl eframe::App for Launcher {
                             _ => "Workspace write: approval required for additional access.",
                         };
                         ui.label(RichText::new(detail).size(11.0).color(MUTED));
+                    } else {
+                        let agent = if self.settings.agent == "claude" {
+                            "Claude Code"
+                        } else {
+                            "Gemini CLI"
+                        };
+                        ui.label(
+                            RichText::new(format!("{agent} uses its installed CLI settings."))
+                                .size(13.0)
+                                .color(MUTED),
+                        );
                     }
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
@@ -539,7 +588,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "Air Launcher",
+        concat!("Air Launcher v", env!("CARGO_PKG_VERSION")),
         options,
         Box::new(|context| Ok(Box::new(Launcher::new(context)))),
     )
