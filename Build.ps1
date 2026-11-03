@@ -14,8 +14,19 @@ try {
         Copy-Item -LiteralPath $previousSettings -Destination $settingsPath
     }
     $localCodex = Join-Path $toolDirectory 'node_modules\.bin\codex.cmd'
-    if (-not (Test-Path -LiteralPath $localCodex)) {
-        & rtk npm install --prefix $toolDirectory '@openai/codex@0.163.0'
+    $codexPackageJson = Join-Path $toolDirectory 'node_modules\@openai\codex\package.json'
+    $needsCodexInstall = $true
+    if ((Test-Path -LiteralPath $localCodex) -and (Test-Path -LiteralPath $codexPackageJson)) {
+        try {
+            $installedVersion = (Get-Content -LiteralPath $codexPackageJson -Raw | ConvertFrom-Json).version
+            if ($installedVersion -ge '0.166.0') {
+                $needsCodexInstall = $false
+            }
+        }
+        catch { }
+    }
+    if ($needsCodexInstall) {
+        & rtk npm install --prefix $toolDirectory '@openai/codex@0.166.0'
         if ($LASTEXITCODE -ne 0) { throw 'The launcher Codex installation failed.' }
     }
 

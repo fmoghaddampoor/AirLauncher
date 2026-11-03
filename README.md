@@ -14,7 +14,7 @@ The launcher starts `central run <agent>` with inherited console handles for eac
 
 Codex uses a separate CLI installation at `%USERPROFILE%\.air-launcher\tools` and settings at `%USERPROFILE%\.air-launcher\codex`. This avoids the older system CLI's `service_tier = "default"` parsing error and its inability to load the gateway's separate profile files. Existing `.codex` settings remain intact. Sessions and trust choices are separate from the desktop app. Existing JetBrains authentication is reused. The user-folder location is accessible from both packaged applications and Windows Terminal; LocalAppData can be redirected into an application's private cache.
 
-Requirements: Windows PowerShell, RTK, JetBrains Air Gateway / Central CLI, and the selected agent. Build.ps1 installs Codex 0.163.0 separately for the launcher; Claude Code and Gemini CLI must be installed on PATH. A different computer needs these tools and its own JetBrains sign-in.
+Requirements: Windows PowerShell, RTK, JetBrains Air Gateway / Central CLI, and the selected agent. Build.ps1 installs Codex 0.166.0 separately for the launcher; Claude Code and Gemini CLI must be installed on PATH. A different computer needs these tools and its own JetBrains sign-in.
 
 Gateway setup: https://www.jetbrains.com/help/central-cli/quickstart.html
 
