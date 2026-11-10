@@ -18,12 +18,109 @@ try {
     Write-Host "  $Project" -ForegroundColor DarkGray
     Write-Host ''
 
+    # Refresh PATH from registry and ensure standard CLI directories are present even when launched from stale environments.
+    $pathParts = @()
+    if ($env:PATH) { $pathParts += ($env:PATH -split [IO.Path]::PathSeparator) }
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    if ($userPath) { $pathParts += ($userPath -split [IO.Path]::PathSeparator) }
+    $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+    if ($machinePath) { $pathParts += ($machinePath -split [IO.Path]::PathSeparator) }
+
+    $standardDirs = @(
+        (Join-Path $env:USERPROFILE '.local\bin'),
+        (Join-Path $env:USERPROFILE '.cargo\bin'),
+        (Join-Path $env:USERPROFILE '.rtk\bin'),
+        (Join-Path $env:USERPROFILE '.headroom\bin'),
+        (Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps'),
+        (Join-Path $env:LOCALAPPDATA 'Programs\central')
+    )
+    foreach ($dir in $standardDirs) {
+        if ([IO.Directory]::Exists($dir)) {
+            $pathParts += $dir
+        }
+    }
+
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $uniquePaths = [System.Collections.Generic.List[string]]::new()
+    foreach ($entry in $pathParts) {
+        $clean = $entry.Trim()
+        if ($clean -and $seen.Add($clean)) {
+            $uniquePaths.Add($clean)
+        }
+    }
+    $env:PATH = ($uniquePaths -join [IO.Path]::PathSeparator)
+
+    # Locate the JetBrains Central CLI gateway executable.
+    $gatewayCmd = Get-Command central.exe -ErrorAction SilentlyContinue
+    if (-not $gatewayCmd) {
+        $gatewayCmd = Get-Command central -ErrorAction SilentlyContinue
+    }
+    if (-not $gatewayCmd) {
+        $candidatePaths = @(
+            (Join-Path $env:USERPROFILE '.local\bin\central.exe'),
+            (Join-Path $env:LOCALAPPDATA 'Programs\central\central.exe'),
+            (Join-Path $env:ProgramFiles 'JetBrains\Central\central.exe'),
+            (Join-Path ${env:ProgramFiles(x86)} 'JetBrains\Central\central.exe')
+        )
+        foreach ($candidate in $candidatePaths) {
+            if ([IO.File]::Exists($candidate)) {
+                $candidateDir = [IO.Path]::GetDirectoryName($candidate)
+                $env:PATH = $candidateDir + [IO.Path]::PathSeparator + $env:PATH
+                $gatewayCmd = [pscustomobject]@{ Source = $candidate }
+                break
+            }
+        }
+    }
+    if (-not $gatewayCmd) {
+        throw "JetBrains Central CLI ('central.exe') was not found in PATH or at '$env:USERPROFILE\.local\bin\central.exe'. Install Central CLI (https://www.jetbrains.com/help/central-cli/quickstart.html)."
+    }
+    $gateway = $gatewayCmd.Source
+
+    function Stop-StaleGatewayProxy {
+        param([int]$Port = 19516)
+        try {
+            $connections = Get-NetTCPConnection -LocalPort $Port -ErrorAction SilentlyContinue
+            foreach ($conn in $connections) {
+                $procId = $conn.OwningProcess
+                if ($procId -and $procId -ne $PID) {
+                    $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
+                    if ($proc -and ($proc.ProcessName -like '*central*' -or $proc.Path -like '*central.exe*')) {
+                        $activeAgent = Get-CimInstance Win32_Process -Filter "Name = 'central.exe'" -ErrorAction SilentlyContinue |
+                            Where-Object { $_.CommandLine -like '*run *' -and $_.ProcessId -ne $PID -and $_.ProcessId -ne $procId }
+                        if (-not $activeAgent) {
+                            Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+                        }
+                    }
+                }
+            }
+            $runningCentral = Get-Process -Name 'central' -ErrorAction SilentlyContinue
+            if (-not $runningCentral) {
+                $pidFile = Join-Path $env:USERPROFILE '.jetbrains-central\proxy.pid'
+                if ([IO.File]::Exists($pidFile)) {
+                    Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+        catch { }
+    }
+
+    # Ensure stale or orphaned proxy daemons do not block port 19516.
+    Stop-StaleGatewayProxy
+
     if ($Action -eq 'login') {
-        & rtk proxy central login
+        if (Get-Command rtk.exe -ErrorAction SilentlyContinue) {
+            & rtk proxy central login
+        } else {
+            & $gateway login
+        }
         return
     }
     if ($Action -eq 'status') {
-        & rtk proxy central status
+        if (Get-Command rtk.exe -ErrorAction SilentlyContinue) {
+            & rtk proxy central status
+        } else {
+            & $gateway status
+        }
         return
     }
 
@@ -57,10 +154,17 @@ try {
         $previousErrorPreference = $ErrorActionPreference
         try {
             $ErrorActionPreference = 'Continue'
-            $null = & rtk proxy central @agentArguments debug prompt-input 'Validate the launcher configuration without sending a model request.' 2> $checkErrorPath
+            if (Get-Command rtk.exe -ErrorAction SilentlyContinue) {
+                $null = & rtk proxy central @agentArguments debug prompt-input 'Validate the launcher configuration without sending a model request.' 2> $checkErrorPath
+            } else {
+                $null = & $gateway @agentArguments debug prompt-input 'Validate the launcher configuration without sending a model request.' 2> $checkErrorPath
+            }
             $checkExitCode = $LASTEXITCODE
         }
-        finally { $ErrorActionPreference = $previousErrorPreference }
+        finally {
+            $ErrorActionPreference = $previousErrorPreference
+            Stop-StaleGatewayProxy
+        }
         if ($ReceiptPath) { [IO.File]::WriteAllText($ReceiptPath, [string]$checkExitCode) }
         exit $checkExitCode
     }
@@ -68,12 +172,12 @@ try {
     # Interactive agents must inherit the console handles; output proxies turn stdout into a pipe.
     $hasBasicTerminalType = [string]::IsNullOrWhiteSpace($env:TERM) -or $env:TERM -eq 'dumb'
     if ($hasBasicTerminalType) { $env:TERM = 'xterm-256color' }
-    $gateway = (Get-Command central.exe -ErrorAction Stop).Source
     $agentProcess = Start-Process -FilePath $gateway -ArgumentList $agentArguments -NoNewWindow -Wait -PassThru
     $agentExitCode = $agentProcess.ExitCode
     if ($agentExitCode -ne 0) {
         Write-Host "Agent exited with code $agentExitCode. Read the error above; use Gateway status in the launcher for connection details." -ForegroundColor Yellow
     }
+    Stop-StaleGatewayProxy
 }
 catch {
     Write-Host $_.Exception.Message -ForegroundColor Red

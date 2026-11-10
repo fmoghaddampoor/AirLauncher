@@ -181,6 +181,19 @@ fn shell_arguments(
     arguments
 }
 
+fn find_windows_terminal() -> PathBuf {
+    if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
+        let wt = PathBuf::from(local_app_data)
+            .join("Microsoft")
+            .join("WindowsApps")
+            .join("wt.exe");
+        if wt.is_file() {
+            return wt;
+        }
+    }
+    PathBuf::from("wt.exe")
+}
+
 fn open_terminal(
     project: &std::path::Path,
     agent: &str,
@@ -192,7 +205,8 @@ fn open_terminal(
     fs::create_dir_all(&directory)?;
     let arguments = shell_arguments(project, agent, action, receipt, codex);
     let shell = "powershell.exe";
-    let terminal = Command::new("wt.exe")
+    let wt_executable = find_windows_terminal();
+    let terminal = Command::new(&wt_executable)
         .args(["-w", "new", "new-tab", shell])
         .args(&arguments)
         .current_dir(project)
